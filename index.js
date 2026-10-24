@@ -1,11 +1,19 @@
 require('dotenv').config();
 const Parser = require('rss-parser');
 const { createClient } = require('@supabase/supabase-js');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const cron = require('node-cron');
 const http = require('http');
 
+// Supabase & Gemini İstemcileri
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-const parser = new Parser({ headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+const parser = new Parser({ 
+  customFields: { item: ['media:content', 'enclosure'] },
+  headers: { 'User-Agent': 'Mozilla/5.0' } 
+});
 
 const FEEDS = [
   'https://www.haber61.net/rss',
@@ -13,82 +21,90 @@ const FEEDS = [
   'https://www.61saat.com/rss'
 ];
 
-// Yalnızca Trabzonspor ve Futbol/Spor Terimleri
-const SPOR_KELIMELERI = [
-  'trabzonspor', 'bordo mavi', 'bordo-mavi', 'papara park', 'ertuğrul doğan', 
-  'şenol güneş', 'thomas reis', 'akyazı', 'derbi', 'süper lig', 'futbol', 
-  'transfer', 'sakatlık', 'ilk 11', 'bonservis', 'u19'
-];
+const SPOR_KELIMELERI = ['trabzonspor', 'bordo', 'papara park', 'ertuğrul doğan', 'şenol güneş', 'thomas reis', 'akyazı', 'derbi', 'süper lig', 'transfer'];
+const CHOP_KELIMELERI = ['dolmuş', 'fiyatları', 'belediye', 'muhtar', 'kaza', 'siyaset', 'parti', 'seçim', 'su birikintisi', 'vefat'];
 
-// Kesinlikle Engellenecek Alakasız Konular (Karaliste)
-const CHOP_KELIMELERI = [
-  'dolmuş', 'fiyatları', 'ücretleri', 'belediye', 'muhtar', 'kaza', 'yangın', 
-  'dereye uçtu', 'elektrik kesintisi', 'siyaset', 'parti', 'seçim', 'su birikintisi', 
-  'su ihtiyacı', 'vefat etti', 'gölet', 'boks'
-];
+// Gemini İle Telifsiz Özgün İçerik Üretme Fonksiyonu
+async function rewriteWithGemini(originalTitle, originalSummary) {
+  try {
+    const prompt = `Sen 61Dalga adında bağımsız bir Trabzonspor haber sitesinin editörüsün.
+Aşağıdaki haberi telif hakkı doğurmayacak şekilde tamamen kendi cümlelerinle özgünleştir. 
+Yanıtını TAM OLARAK şu JSON formatında ver:
+{
+  "title": "Çarpıcı ve özgün Trabzonspor başlığı",
+  "summary": "2-3 cümlelik heyecanlı, akıcı ve tamamen özgün haber özeti"
+}
+
+Haber Başlığı: ${originalTitle}
+Haber Detayı: ${originalSummary}`;
+
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text();
+    
+    // JSON Temizleme
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]);
+    }
+  } catch (err) {
+    console.error('[GEMINI HATA]:', err.message);
+  }
+  
+  // Hata durumunda yedek temizleme
+  return {
+    title: originalTitle.replace(/^(İşte|Bakın|Şok|Son Dakika!|Flaş)\s*/i, '').trim(),
+    summary: originalSummary.replace(/<[^>]*>/g, '').substring(0, 200).trim() + '...'
+  };
+}
 
 async function scanNews() {
-  console.log('[61DALGA BOT] Trabzonspor Odaklı RSS Taranıyor...');
-  let addedCount = 0;
-
+  console.log('[61DALGA BOT] Gemini Destekli RSS Taranıyor...');
+  
   for (const url of FEEDS) {
     try {
       const feed = await parser.parseURL(url);
-      
       for (const item of feed.items || []) {
         const title = item.title || '';
         const summary = item.contentSnippet || item.content || item.summary || '';
         const link = item.link;
-
         if (!link) continue;
 
         const text = (title + ' ' + summary).toLowerCase();
+        if (CHOP_KELIMELERI.some(w => text.includes(w))) continue;
+        if (!SPOR_KELIMELERI.some(w => text.includes(w))) continue;
 
-        // 1. Karaliste Kontrolü (Dolmuş, kaza, siyaset varsa DİREKT ELE)
-        const isChop = CHOP_KELIMELERI.some(word => text.includes(word));
-        if (isChop) continue;
+        // Resim URL'sini Yakalama
+        let imageUrl = '';
+        if (item.enclosure && item.enclosure.url) imageUrl = item.enclosure.url;
+        else if (item['media:content'] && item['media:content'].$.url) imageUrl = item['media:content'].$.url;
 
-        // 2. Trabzonspor / Spor Kontrolü
-        const isSports = SPOR_KELIMELERI.some(word => text.includes(word));
-
-        if (isSports) {
-          const { data } = await supabase.from('articles').select('id').eq('link', link);
+        const { data } = await supabase.from('articles').select('id').eq('link', link);
+        if (!data || data.length === 0) {
           
-          if (!data || data.length === 0) {
-            let cleanTitle = title.replace(/^(İşte|Bakın|Şok|Son Dakika!|Flaş)\s*/i, '').trim();
-            let cleanSummary = summary.replace(/<[^>]*>/g, '').substring(0, 160).trim() + '...';
+          console.log('[GEMINI İŞLENİYOR]:', title);
+          const aiData = await rewriteWithGemini(title, summary);
 
-            const { error: insertError } = await supabase.from('articles').insert([{
-              link: link,
-              original_title: title,
-              original_summary: summary,
-              rewritten_title: cleanTitle,
-              rewritten_summary: cleanSummary,
-              source: feed.title || 'Trabzon Basını',
-              published_at: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString()
-            }]);
+          await supabase.from('articles').insert([{
+            link: link,
+            original_title: title,
+            original_summary: summary,
+            rewritten_title: aiData.title,
+            rewritten_summary: aiData.summary,
+            image_url: imageUrl || 'https://via.placeholder.com/600x350?text=61Dalga+Trabzonspor',
+            source: feed.title || 'Trabzon Basını',
+            published_at: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString()
+          }]);
 
-            if (!insertError) {
-              console.log('[FUTBOL HABERİ EKLENDİ]:', cleanTitle);
-              addedCount++;
-            }
-          }
+          console.log('[TELİFSİZ HABER EKLENDİ]:', aiData.title);
         }
       }
     } catch (err) {
-      console.error('[RSS HATA]:', url, err.message);
+      console.error('[RSS HATA]:', err.message);
     }
   }
-  console.log(`[TARAMA BİTTİ] ${addedCount} adet saf Trabzonspor haberi eklendi.`);
 }
 
-cron.schedule('*/3 * * * *', scanNews);
+cron.schedule('*/5 * * * *', scanNews); // 5 dakikada bir çalışır
 
 const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('61Dalga Haber Botu Aktif!');
-}).listen(PORT, () => {
-  console.log(`[HTTP] Sunucu ${PORT} portunda çalışıyor.`);
-  scanNews();
-});
+http.createServer((req, res) => { res.end('61Dalga Gemini Bot Active'); }).listen(PORT, () => { scanNews(); });
