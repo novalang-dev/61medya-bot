@@ -8,11 +8,21 @@ const http = require('http');
 // Supabase & Gemini İstemcileri
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
+// JSON yanıt zorlaması ile Gemini model tanımı
+const model = genAI.getGenerativeModel({ 
+  model: 'gemini-1.5-flash',
+  generationConfig: { responseMimeType: "application/json" }
+});
+
+// Tarayıcı gibi görünen gelişmiş Parser (403 engeli için)
 const parser = new Parser({ 
-  customFields: { item: ['media:content', 'enclosure'] },
-  headers: { 'User-Agent': 'Mozilla/5.0' } 
+  customFields: { item: ['media:content', 'enclosure', 'content:encoded'] },
+  headers: { 
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7'
+  } 
 });
 
 const FEEDS = [
@@ -36,25 +46,19 @@ Yanıtını TAM OLARAK şu JSON formatında ver:
 }
 
 Haber Başlığı: ${originalTitle}
-Haber Detayı: ${originalSummary}`;
+Haber Detayı: ${originalSummary || originalTitle}`;
 
     const result = await model.generateContent(prompt);
     const responseText = result.response.text();
-    
-    // JSON Temizleme
-    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
-    }
+    return JSON.parse(responseText);
+
   } catch (err) {
     console.error('[GEMINI HATA]:', err.message);
+    return {
+      title: originalTitle.replace(/^(İşte|Bakın|Şok|Son Dakika!|Flaş)\s*/i, '').trim(),
+      summary: (originalSummary || originalTitle).replace(/<[^>]*>/g, '').substring(0, 200).trim() + '...'
+    };
   }
-  
-  // Hata durumunda yedek temizleme
-  return {
-    title: originalTitle.replace(/^(İşte|Bakın|Şok|Son Dakika!|Flaş)\s*/i, '').trim(),
-    summary: originalSummary.replace(/<[^>]*>/g, '').substring(0, 200).trim() + '...'
-  };
 }
 
 async function scanNews() {
@@ -65,18 +69,26 @@ async function scanNews() {
       const feed = await parser.parseURL(url);
       for (const item of feed.items || []) {
         const title = item.title || '';
-        const summary = item.contentSnippet || item.content || item.summary || '';
+        const rawContent = item['content:encoded'] || item.content || item.summary || item.contentSnippet || '';
+        const summary = rawContent.replace(/<[^>]*>/g, '').trim();
         const link = item.link;
+        
         if (!link) continue;
 
         const text = (title + ' ' + summary).toLowerCase();
         if (CHOP_KELIMELERI.some(w => text.includes(w))) continue;
         if (!SPOR_KELIMELERI.some(w => text.includes(w))) continue;
 
-        // Resim URL'sini Yakalama
+        // Görsel URL'sini 3 farklı noktadan tarayarak yakalama
         let imageUrl = '';
-        if (item.enclosure && item.enclosure.url) imageUrl = item.enclosure.url;
-        else if (item['media:content'] && item['media:content'].$.url) imageUrl = item['media:content'].$.url;
+        if (item.enclosure && item.enclosure.url) {
+          imageUrl = item.enclosure.url;
+        } else if (item['media:content'] && item['media:content'].$.url) {
+          imageUrl = item['media:content'].$.url;
+        } else {
+          const imgMatch = rawContent.match(/<img[^>]+src=["']([^"']+)["']/i);
+          if (imgMatch) imageUrl = imgMatch[1];
+        }
 
         const { data } = await supabase.from('articles').select('id').eq('link', link);
         if (!data || data.length === 0) {
@@ -99,12 +111,12 @@ async function scanNews() {
         }
       }
     } catch (err) {
-      console.error('[RSS HATA]:', err.message);
+      console.error('[RSS HATA]:', url, err.message);
     }
   }
 }
 
-cron.schedule('*/5 * * * *', scanNews); // 5 dakikada bir çalışır
+cron.schedule('*/5 * * * *', scanNews);
 
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => { res.end('61Dalga Gemini Bot Active'); }).listen(PORT, () => { scanNews(); });
