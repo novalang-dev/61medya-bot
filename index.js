@@ -9,13 +9,13 @@ const http = require('http');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// JSON yanıt zorlaması ile Gemini model tanımı
+// JSON Yanıt Garantili Model Tanımı
 const model = genAI.getGenerativeModel({ 
-  model: 'gemini-1.5-flash',
+  model: 'gemini-2.5-flash',
   generationConfig: { responseMimeType: "application/json" }
 });
 
-// Tarayıcı gibi görünen gelişmiş Parser (403 engeli için)
+// Tarayıcı Taklidi Yapan RSS Parser (403 Engeli İçin)
 const parser = new Parser({ 
   customFields: { item: ['media:content', 'enclosure', 'content:encoded'] },
   headers: { 
@@ -26,9 +26,9 @@ const parser = new Parser({
 });
 
 const FEEDS = [
-  'https://www.haber61.net/rss',
-  'https://www.taka61.net/rss/trabzonspor',
-  'https://www.61saat.com/rss'
+  '[https://www.haber61.net/rss](https://www.haber61.net/rss)',
+  '[https://www.taka61.net/rss/trabzonspor](https://www.taka61.net/rss/trabzonspor)',
+  '[https://www.61saat.com/rss](https://www.61saat.com/rss)'
 ];
 
 const SPOR_KELIMELERI = ['trabzonspor', 'bordo', 'papara park', 'ertuğrul doğan', 'şenol güneş', 'thomas reis', 'akyazı', 'derbi', 'süper lig', 'transfer'];
@@ -49,7 +49,14 @@ Haber Başlığı: ${originalTitle}
 Haber Detayı: ${originalSummary || originalTitle}`;
 
     const result = await model.generateContent(prompt);
-    const responseText = result.response.text();
+    let responseText = result.response.text();
+    
+    // Markdown ve JSON temizliği (Garantili parse işlemi)
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]);
+    }
+    
     return JSON.parse(responseText);
 
   } catch (err) {
@@ -79,7 +86,7 @@ async function scanNews() {
         if (CHOP_KELIMELERI.some(w => text.includes(w))) continue;
         if (!SPOR_KELIMELERI.some(w => text.includes(w))) continue;
 
-        // Görsel URL'sini 3 farklı noktadan tarayarak yakalama
+        // Görsel URL'sini 3 Farklı Yöntemle Yakalama
         let imageUrl = '';
         if (item.enclosure && item.enclosure.url) {
           imageUrl = item.enclosure.url;
@@ -102,7 +109,7 @@ async function scanNews() {
             original_summary: summary,
             rewritten_title: aiData.title,
             rewritten_summary: aiData.summary,
-            image_url: imageUrl || 'https://via.placeholder.com/600x350?text=61Dalga+Trabzonspor',
+            image_url: imageUrl || '[https://via.placeholder.com/600x350?text=61Dalga+Trabzonspor](https://via.placeholder.com/600x350?text=61Dalga+Trabzonspor)',
             source: feed.title || 'Trabzon Basını',
             published_at: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString()
           }]);
