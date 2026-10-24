@@ -1,14 +1,15 @@
 {
-  "name": "61dalga-haber-botu",
+  "name": "61dalga-bot",
   "version": "1.0.0",
+  "description": "61Dalga Trabzonspor RSS & AI Botu",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.21.0",
     "@supabase/supabase-js": "^2.39.0",
-    "axios": "^1.6.0",
-    "dotenv": "^16.3.0",
+    "dotenv": "^16.4.5",
     "node-cron": "^3.0.3",
     "rss-parser": "^3.13.0"
   }
